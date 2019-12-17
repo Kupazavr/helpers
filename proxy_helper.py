@@ -115,11 +115,7 @@ class ProxyHelper:
         proxies_list = self.load_proxies_list()
         if len(proxies_list) == 0:
             logging.error('get 0 proxies, get them from hardcoded')
-            proxies_list_hardcoded = ['104.144.176.107:3128',
-                                      '104.227.106.190:3128',
-                                      '107.152.145.103:3128',
-                                      '216.246.49.123:3128',
-                                      '23.94.21.30:3128']
+            proxies_list_hardcoded = []
             proxies_list.extend(proxies_list_hardcoded)
 
         return proxies_list
@@ -128,7 +124,7 @@ class ProxyHelper:
     def load_proxies_list():
         proxies_list = []
         try:
-            api_url = 'http://64.140.158.34:5000/proxy'
+            api_url = ''
             r = requests.get(api_url, timeout=60)
             if r.status_code == 200:
                 proxies_list = r.json()
