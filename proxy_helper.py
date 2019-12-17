@@ -77,7 +77,7 @@ class ProxyHelper:
         return sorted_proxies
 
     def get_valid_proxies(self):
-        proxies_list = self.get_proxies_list()[:500]
+        proxies_list = self.get_proxies_list()
         chunks = list(chunkify(proxies_list, 500))
         valid_proxies = {}
         for n, chunk in enumerate(chunks):
