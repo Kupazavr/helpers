@@ -1,44 +1,84 @@
 import requests
-from helpers.proxy_helper import ProxyHelper
-import os
-import csv
+from helpers.proxy_helper import ProxyHelper, BadProxyError
 import logging
-import random
-from hashlib import sha256
-import base64
+import copy
+import time
 
 
 class Downloader:
-    def __init__(self, check_url, use_proxy=True, attempts=20, use_user_agents=True, use_session=False):
+    def __init__(self, check_url, use_proxy=True, attempts=20, use_user_agents=True, use_session=False, request_per_min=20):
         self.check_url = check_url
         self.use_proxy = use_proxy
         self.use_session = use_session
         self.update_request_maker()
-        self.proxy_helper = ProxyHelper(check_url, use_proxy)
+        self.proxy_helper = ProxyHelper(check_url, use_proxy, request_per_min)
         self.attempts = attempts
         self.use_user_agents = use_user_agents
-        self.user_agents_list = self.load_user_agents()
+        self.user_agents_list = ProxyHelper.load_user_agents()
+        self.proxy_auth = {}
+        self.session_update_time = time.time()
 
     def update_request_maker(self):
         if self.use_session:
             self.request_maker = requests.Session()
+            # raise max pool size for use bigger thread pool size
+            a = requests.adapters.HTTPAdapter(pool_maxsize=9999)
+            self.request_maker.mount('https://', a)
         else:
             self.request_maker = requests
 
-    def create_request(self, method, url, cookies=None, data={}, headers={}, timeout=60, files=None):
+    def get_proxies(self, proxy):
+        """
+        Creating proxy object from simple proxy string
+        :param proxy: proxy string with {ip}:{port} pattern
+        :type proxy: str
+        :return: proxy object
+        :rtype: dict
+        """
+        # get login and password if proxy required logining
+        login = self.proxy_auth.get(proxy, {}).get('login', '')
+        password = self.proxy_auth.get(proxy, {}).get('password', '')
+        proxy_string = '{}' + f'://{login}:{password}@{proxy}'
+        proxies = {'https': proxy_string.format('https'),
+                   'http': proxy_string.format('http')}
+        return proxies
+
+    def create_request(self, method, url, params={}, cookies=None, data={}, headers={}, timeout=60, files=None):
+        # Decorator must use instant function because we must change instant proxy dataframe only
         @self.proxy_helper.exception_decorator
         def request_to_page(proxy, **kwargs):
-            proxies = {'https': proxy, 'http': proxy}
-            response = self.request_maker.request(proxies=proxies, **kwargs)
-            if response.status_code >= 400:
-                logging.debug('get 400 response_code')
-                raise
-            return response
-
+            """
+            Request wrapper
+            :param proxy: proxy string with {ip}:{port} pattern
+            :type proxy: str
+            :param kwargs: request params
+            :return: response text
+            :rtype: str
+            """
+            proxies = self.get_proxies(proxy) if proxy else {}
+            response_text = ''
+            start_time = time.time()
+            response = self.request_maker.request(proxies=proxies, stream=True, **kwargs)
+            for content in response.iter_content(1024, decode_unicode=True):
+                if time.time() - start_time > 30:
+                    # if request time longer than 30 sec must stop request
+                    raise BadProxyError
+                try:
+                    # if content is json object, concat it raw, else decode in utf-8
+                    response_text += content
+                except TypeError:
+                    response_text += content.decode('utf-8')
+                if "You don't have permission to access" in response_text:
+                    # proxy banned
+                    raise BadProxyError
+            return response_text
+        headers = copy.deepcopy(headers)
         attempts = self.attempts
         while attempts > 0:
             if self.use_user_agents:
-                headers.update({'user-agent': self.get_random_user_agent()})
+                random_agent = self.proxy_helper.get_random_user_agent()
+                headers.update({'user-agent': random_agent})
+
             attempts -= 1
             # try without proxies last time
             raw_proxy = self.proxy_helper.get_proxy() if self.use_proxy and attempts != 1 else None
@@ -46,67 +86,47 @@ class Downloader:
                 request_response = request_to_page(proxy=raw_proxy,
                                                    method=method,
                                                    url=url,
+                                                   params=params,
                                                    cookies=cookies,
                                                    data=data,
                                                    headers=headers,
                                                    timeout=timeout,
                                                    files=files)
+
                 return request_response
             except Exception as e:
-                logging.debug('received exception on request on {} try'.format(self.attempts - attempts))
+                if isinstance(e, BadProxyError):
+                    attempts += 1
+                logging.debug('received {} exception on request on {} try on {} link'.format(e, self.attempts - attempts, url))
 
-    def get(self, url, cookies=None, headers={}, timeout=60):
+    def get(self, url, params={}, cookies=None, headers={}, timeout=60):
+        """
+        Get method wrapper
+        :param: request params
+        :return: response text or None if we have no response
+        :rtype: str, None
+        """
         return self.create_request(method='GET',
                                    url=url,
+                                   params=params,
                                    cookies=cookies,
                                    headers=headers,
                                    timeout=timeout)
 
-    def post(self, url, cookies=None, data={}, headers={}, timeout=60, files=None):
+    def post(self, url, params={}, cookies=None, data={}, headers={}, timeout=60, files=None):
+        """
+        Post method wrapper
+        :param: request params
+        :return: response text or None if we have no response
+        :rtype: str, None
+        """
         return self.create_request(method='POST',
                                    url=url,
+                                   params=params,
                                    cookies=cookies,
                                    data=data,
                                    headers=headers,
                                    timeout=timeout,
                                    files=files)
 
-    @staticmethod
-    def load_user_agents():
-        cd = os.path.dirname(os.path.abspath(__file__))
-        csvFile = os.path.join(cd, 'valid_user_agents.csv')
-        with open(csvFile, 'r') as f:
-            reader = csv.reader(f)
-            user_agent_list = list(reader)
-            user_agent_list = [x[0] for x in user_agent_list]
-        return user_agent_list
 
-    def get_random_user_agent(self):
-        '''Get random user-agent'''
-        try:
-            user_agent = random.choice(self.user_agents_list)
-            return user_agent
-        except:
-            logging.error('Cannot get random user-agent', exc_info=True)
-            return ''
-
-    def download_file(self, link, response_format, timeout=60):
-        try:
-            response = self.get(link, timeout=timeout)
-            file_id = sha256(response.content).hexdigest() + f'.{response_format}'
-            file = open(f'../stream/instagram/{file_id}', 'wb')
-            file.write(response.content)
-            file.close()
-        except AttributeError:
-            return None
-        return file_id
-
-    @staticmethod
-    def download_logos(image, resource):
-        image = image.split('base64,')[1]
-        bytes_image = base64.b64decode(image)
-        file_id = sha256(image.encode()).hexdigest() + '.png'
-        file = open(f'../stream/{resource}/{file_id}', 'wb')
-        file.write(bytes_image)
-        file.close()
-        return file_id
